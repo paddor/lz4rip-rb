@@ -1,0 +1,16 @@
+[package]
+name    = "lz4rip"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "lz4rip"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lz4    = { version = "0.8", package = "lz4rip" }
+magnus = "0.8"
+rb-sys = "0.9"
+
+[build-dependencies]
+rb-sys = "0.9"
