@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-29
+
+- Update `lz4rip` crate dependency from 0.8 to 0.9.
+
 ## [0.1.0] - 2026-06-20
 
 - Initial release.
