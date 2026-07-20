@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::io::{Cursor, Read, Write};
 use std::sync::OnceLock;
 
-use lz4::block::{self, Compressor, Decompressor, DictTrainer};
+use lz4::block::{self, Decompressor, DictCompressor, DictTrainer};
 use lz4::frame::{BlockMode, FrameDecoder, FrameEncoder, FrameInfo};
 
 const COMPRESSOR_HEAP_SIZE: usize = 8192;
@@ -37,7 +37,7 @@ fn lz4rip_block_stream_size(_ruby: &Ruby) -> usize {
 
 #[magnus::wrap(class = "Lz4rip::BlockCodec", free_immediately, size)]
 struct BlockCodec {
-    compressor: Option<RefCell<Compressor>>,
+    compressor: Option<RefCell<DictCompressor>>,
     decompressor: Option<Decompressor>,
     dict_len: usize,
 }
@@ -52,7 +52,7 @@ fn block_codec_new(_ruby: &Ruby, rb_dict: Option<RString>) -> Result<BlockCodec,
         Some(rb_dict) => {
             let bytes: Vec<u8> = unsafe { rb_dict.as_slice().to_vec() };
             Ok(BlockCodec {
-                compressor: Some(RefCell::new(Compressor::with_dict(&bytes))),
+                compressor: Some(RefCell::new(DictCompressor::new(&bytes))),
                 decompressor: Some(Decompressor::with_dict(&bytes)),
                 dict_len: bytes.len(),
             })
@@ -147,7 +147,15 @@ fn frame_codec_compress(
             let info = FrameInfo::new().block_mode(BlockMode::Linked);
             FrameEncoder::with_frame_info(info, buf)
         }
-        Some(d) => FrameEncoder::with_dictionary(buf, &d.bytes, d.id),
+        Some(d) => {
+            let info = FrameInfo::new().block_mode(BlockMode::Linked);
+            FrameEncoder::with_dictionary(buf, &d.bytes, d.id, Some(info)).map_err(|e| {
+                Error::new(
+                    ruby.exception_runtime_error(),
+                    format!("lz4 frame compress failed: {e}"),
+                )
+            })?
+        }
     };
 
     enc.write_all(input).map_err(|e| {
@@ -350,7 +358,7 @@ mod tests {
         let dict = b"common log prefix: ".to_vec();
         let msg = b"common log prefix: event=login user=alice".to_vec();
 
-        let mut comp = Compressor::with_dict(&dict);
+        let mut comp = DictCompressor::new(&dict);
         let ct_dict = comp.compress(&msg);
         let decomp = Decompressor::with_dict(&dict);
         let pt = decomp.decompress(&ct_dict, msg.len()).unwrap();
