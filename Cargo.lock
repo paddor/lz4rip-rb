@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lz4rip 0.11.2",
  "magnus",
