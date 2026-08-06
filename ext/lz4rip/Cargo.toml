@@ -8,7 +8,7 @@ name       = "lz4rip"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-lz4    = { version = "0.11.2", package = "lz4rip" }
+lz4    = { version = "0.11.2", git = "https://github.com/paddor/lz4rip", rev = "e0fae3a764a973a4ce2b6c8f62f19672b5cd8948", package = "lz4rip" }
 magnus = { version = "0.8", features = ["rb-sys"] }
 rb-sys = "0.9"
 

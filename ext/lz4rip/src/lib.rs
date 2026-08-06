@@ -10,7 +10,7 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use lz4::block::{self, Decompressor, DictCompressor, DictTrainer};
-use lz4::frame::{BlockMode, FrameDecoder, FrameEncoder, FrameInfo};
+use lz4::frame::{BlockMode, FrameDecoder, FrameDecoderOptions, FrameEncoder, FrameInfo};
 
 const COMPRESSOR_HEAP_SIZE: usize = 8192;
 
@@ -277,6 +277,7 @@ fn frame_codec_decompress(
     ruby: &Ruby,
     rb_self: &FrameCodec,
     rb_input: RString,
+    max_decompressed_size: Option<usize>,
 ) -> Result<RString, Error> {
     let release_gvl = should_release_frame_decompress_gvl(rb_input.len());
     let _input_lock = release_gvl.then(|| RStringLock::new(rb_input));
@@ -290,20 +291,27 @@ fn frame_codec_decompress(
     }
 
     let out = if release_gvl {
-        without_gvl(|| decompress_frame(rb_self, input))
+        without_gvl(|| decompress_frame(rb_self, input, max_decompressed_size))
     } else {
-        decompress_frame(rb_self, input)
+        decompress_frame(rb_self, input, max_decompressed_size)
     }
     .map_err(|e| Error::new(decompress_error(ruby), e))?;
 
     Ok(ruby.str_from_slice(&out))
 }
 
-fn decompress_frame(rb_self: &FrameCodec, input: &[u8]) -> Result<Vec<u8>, String> {
-    let mut dec = match &rb_self.dict {
-        None => FrameDecoder::new(Cursor::new(input)),
-        Some(d) => FrameDecoder::with_dictionary(Cursor::new(input), &d.bytes, d.id),
-    };
+fn decompress_frame(
+    rb_self: &FrameCodec,
+    input: &[u8],
+    max_decompressed_size: Option<usize>,
+) -> Result<Vec<u8>, String> {
+    let mut dec = FrameDecoder::with_options(
+        Cursor::new(input),
+        FrameDecoderOptions {
+            dictionary: rb_self.dict.as_ref().map(|d| (d.bytes.as_slice(), d.id)),
+            max_output: max_decompressed_size,
+        },
+    );
 
     let mut out = Vec::new();
     dec.read_to_end(&mut out)
@@ -439,7 +447,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     frame_codec_class
         .define_singleton_method("_native_new", function!(frame_codec_initialize, 2))?;
     frame_codec_class.define_method("compress", method!(frame_codec_compress, 1))?;
-    frame_codec_class.define_method("decompress", method!(frame_codec_decompress, 1))?;
+    frame_codec_class.define_method("_decompress", method!(frame_codec_decompress, 2))?;
     frame_codec_class.define_method("size", method!(frame_codec_size, 0))?;
     frame_codec_class.define_method("has_dict?", method!(frame_codec_has_dict, 0))?;
     frame_codec_class.define_method("id", method!(frame_codec_id, 0))?;

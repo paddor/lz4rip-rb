@@ -16,5 +16,9 @@ module Lz4rip
         raise TypeError, "expected Lz4rip::Dictionary, String, or nil; got #{dict.class}"
       end
     end
+
+    def decompress(bytes, max_decompressed_size: nil)
+      _decompress(bytes, max_decompressed_size)
+    end
   end
 end

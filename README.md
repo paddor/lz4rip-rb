@@ -42,6 +42,7 @@ require "lz4rip"
 codec = Lz4rip::FrameCodec.new
 compressed = codec.compress("hello world " * 1000)
 original   = codec.decompress(compressed)
+bounded    = codec.decompress(compressed, max_decompressed_size: 12_000)
 ```
 
 ### Block codec (raw LZ4 blocks)
@@ -99,7 +100,7 @@ ractors.each { |r| p r.value }  # => :ok, :ok, :ok, :ok
 |---|---|---|
 | `Lz4rip::FrameCodec` | `.new(dict: nil)` | Create a frame codec, optionally with a `Dictionary` or raw `String` dict |
 | | `#compress(string)` | Compress to LZ4 frame |
-| | `#decompress(string)` | Decompress an LZ4 frame |
+| | `#decompress(string, max_decompressed_size: nil)` | Decompress an LZ4 frame, optionally capping total output |
 | | `#has_dict?` | Whether a dictionary is loaded |
 | | `#id` | Dictionary ID (nil without dict) |
 | | `#size` | Dictionary size in bytes (0 without dict) |

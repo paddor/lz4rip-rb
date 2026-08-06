@@ -74,6 +74,39 @@ class TestFrameCodecNoDict < Minitest::Test
   end
 
 
+  def test_decompress_allows_exact_max_decompressed_size
+    pt = "frame limit payload " * 100
+    ct = @codec.compress(pt)
+
+    assert_equal pt, @codec.decompress(ct, max_decompressed_size: pt.bytesize)
+  end
+
+
+  def test_decompress_rejects_over_max_decompressed_size
+    pt = "frame limit payload " * 100
+    ct = @codec.compress(pt)
+
+    err = assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress(ct, max_decompressed_size: pt.bytesize - 1)
+    end
+    assert_match(/decompressed size limit exceeded/, err.message)
+  end
+
+
+  def test_decompress_limit_applies_to_concatenated_frames
+    first = "A" * 1_000
+    second = "B" * 1_000
+    ct = @codec.compress(first) + @codec.compress(second)
+
+    assert_equal first + second,
+      @codec.decompress(ct, max_decompressed_size: first.bytesize + second.bytesize)
+
+    assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress(ct, max_decompressed_size: first.bytesize + second.bytesize - 1)
+    end
+  end
+
+
   def test_raises_decompress_error_on_garbage
     assert_raises(Lz4rip::DecompressError) { @codec.decompress("not a valid lz4 frame") }
   end

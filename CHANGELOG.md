@@ -4,6 +4,8 @@
 
 - Release the Ruby GVL around large frame/block compression and frame
   decompression calls.
+- Add `max_decompressed_size:` to `Lz4rip::FrameCodec#decompress`, with the
+  cap enforced across concatenated frame output.
 
 ## [0.1.2] - 2026-08-05
 
