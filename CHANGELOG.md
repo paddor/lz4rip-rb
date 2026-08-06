@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Release the Ruby GVL around large frame/block compression and frame
+  decompression calls.
+
 ## [0.1.2] - 2026-08-05
 
 - Update `lz4rip` crate dependency from 0.11.1 to 0.11.2.

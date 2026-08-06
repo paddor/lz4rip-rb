@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 lz4    = { version = "0.11.2", package = "lz4rip" }
-magnus = "0.8"
+magnus = { version = "0.8", features = ["rb-sys"] }
 rb-sys = "0.9"
 
 [build-dependencies]
