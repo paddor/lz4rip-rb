@@ -6,6 +6,8 @@
   decompression calls.
 - Add `max_decompressed_size:` to `Lz4rip::FrameCodec#decompress`, with the
   cap enforced across concatenated frame output.
+- Add RubyDoc metadata and move API reference details from `README.md` into
+  YARD comments.
 
 ## [0.1.2] - 2026-08-05
 

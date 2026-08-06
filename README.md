@@ -1,4 +1,4 @@
-# lz4rip — Ractor-safe LZ4 for Ruby
+# lz4rip: Ractor-safe LZ4 for Ruby
 
 [![CI](https://github.com/paddor/lz4rip-rb/actions/workflows/ci.yml/badge.svg)](https://github.com/paddor/lz4rip-rb/actions/workflows/ci.yml)
 [![Gem Version](https://img.shields.io/gem/v/lz4rip?color=e9573f)](https://rubygems.org/gems/lz4rip)
@@ -94,35 +94,9 @@ end
 ractors.each { |r| p r.value }  # => :ok, :ok, :ok, :ok
 ```
 
-## API
+## Documentation
 
-| Class / Module | Method | Description |
-|---|---|---|
-| `Lz4rip::FrameCodec` | `.new(dict: nil)` | Create a frame codec, optionally with a `Dictionary` or raw `String` dict |
-| | `#compress(string)` | Compress to LZ4 frame |
-| | `#decompress(string, max_decompressed_size: nil)` | Decompress an LZ4 frame, optionally capping total output |
-| | `#has_dict?` | Whether a dictionary is loaded |
-| | `#id` | Dictionary ID (nil without dict) |
-| | `#size` | Dictionary size in bytes (0 without dict) |
-| `Lz4rip::BlockCodec` | `.new(dict: nil)` | Create a block codec, optionally with a dict `String` |
-| | `#compress(string)` | Compress to raw LZ4 block |
-| | `#decompress(string, decompressed_size:)` | Decompress a raw LZ4 block |
-| | `#has_dict?` | Whether a dictionary is loaded |
-| | `#size` | Internal state size in bytes |
-| `Lz4rip::Dictionary` | `.new(bytes:, id: auto)` | Immutable dictionary value object |
-| | `#bytes` | Frozen binary dict bytes |
-| | `#id` | 32-bit dictionary ID |
-| | `#size` | Dictionary size in bytes |
-| `Lz4rip::DictTrainer` | `.new(max_dict_size)` | Create a trainer (capped at 65535) |
-| | `#add_sample(string)` | Feed a training sample |
-| | `#train` | Consume the trainer, return dict bytes |
-| | `#sample_count` | Number of accepted samples |
-| | `#total_bytes` | Total bytes of accepted samples |
-| | `#trained?` | Whether `#train` has been called |
-| | `#max_dict_size` | Configured max dict size |
-| `Lz4rip` | `.compress_bound(size)` | Max compressed output size for a given input size |
-| | `.block_stream_size` | Internal compressor heap size |
-| `Lz4rip::DecompressError` | | Raised on decompression failure (subclass of `StandardError`) |
+Reference: <https://rubydoc.info/gems/lz4rip>
 
 ## License
 
