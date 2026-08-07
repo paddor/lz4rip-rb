@@ -307,12 +307,13 @@ fn block_codec_has_dict_impl(rb_self: VALUE) -> RbResult<VALUE> {
 
 fn block_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE> {
     let rb_self = unsafe { block_codec_ref(rb_self)? };
-    let input = rb::value_to_bytes(rb_input)?;
+    let mut input = rb::input_bytes(rb_input)?;
     let release_gvl = should_release_compress_gvl(input.len());
+    input.lock_for_without_gvl(release_gvl)?;
 
     let out = maybe_without_gvl(release_gvl, || match &rb_self.compressor {
-        None => block::compress(&input),
-        Some(comp) => comp.borrow_mut().compress(&input),
+        None => block::compress(input.as_slice()),
+        Some(comp) => comp.borrow_mut().compress(input.as_slice()),
     });
 
     rb::new_binary_string(&out)
@@ -324,12 +325,12 @@ fn block_codec_decompress_impl(
     decompressed_size: VALUE,
 ) -> RbResult<VALUE> {
     let rb_self = unsafe { block_codec_ref(rb_self)? };
-    let compressed = rb::value_to_bytes(rb_input)?;
+    let compressed = rb::input_bytes(rb_input)?;
     let decompressed_size = rb::value_to_usize(decompressed_size)?;
 
     let result = match &rb_self.decompressor {
-        None => block::decompress(&compressed, decompressed_size),
-        Some(decomp) => decomp.decompress(&compressed, decompressed_size),
+        None => block::decompress(compressed.as_slice(), decompressed_size),
+        Some(decomp) => decomp.decompress(compressed.as_slice(), decompressed_size),
     };
 
     match result {
@@ -399,10 +400,11 @@ fn frame_codec_new_impl(class: VALUE, rb_dict: VALUE, id: VALUE) -> RbResult<VAL
 
 fn frame_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE> {
     let rb_self = unsafe { frame_codec_ref(rb_self)? };
-    let input = rb::value_to_bytes(rb_input)?;
+    let mut input = rb::input_bytes(rb_input)?;
     let release_gvl = should_release_compress_gvl(input.len());
+    input.lock_for_without_gvl(release_gvl)?;
 
-    let out = maybe_without_gvl(release_gvl, || compress_frame(rb_self, &input))
+    let out = maybe_without_gvl(release_gvl, || compress_frame(rb_self, input.as_slice()))
         .map_err(RubyErr::runtime)?;
 
     rb::new_binary_string(&out)
@@ -435,11 +437,12 @@ fn frame_codec_decompress_impl(
     max_decompressed_size: VALUE,
 ) -> RbResult<VALUE> {
     let rb_self = unsafe { frame_codec_ref(rb_self)? };
-    let input = rb::value_to_bytes(rb_input)?;
+    let mut input = rb::input_bytes(rb_input)?;
     let max_decompressed_size = rb::value_to_option_usize(max_decompressed_size)?;
     let release_gvl = should_release_frame_decompress_gvl(input.len());
+    input.lock_for_without_gvl(release_gvl)?;
 
-    if input.len() < 4 || input[..4] != LZ4_FRAME_MAGIC {
+    if input.len() < 4 || input.as_slice()[..4] != LZ4_FRAME_MAGIC {
         return Err(RubyErr::new(
             decompress_error(),
             "lz4 frame decode failed: bad magic (input is not an LZ4 frame)",
@@ -447,7 +450,7 @@ fn frame_codec_decompress_impl(
     }
 
     let out = maybe_without_gvl(release_gvl, || {
-        decompress_frame(rb_self, &input, max_decompressed_size)
+        decompress_frame(rb_self, input.as_slice(), max_decompressed_size)
     })
     .map_err(|e| RubyErr::new(decompress_error(), e))?;
 
@@ -546,11 +549,11 @@ fn dict_trainer_add_sample_impl(rb_self: VALUE, rb_data: VALUE) -> RbResult<VALU
     let trainer = borrow
         .as_mut()
         .ok_or_else(|| RubyErr::runtime("DictTrainer already consumed by #train"))?;
-    let data = rb::value_to_bytes(rb_data)?;
+    let data = rb::input_bytes(rb_data)?;
     let sample = if data.len() > rb_self.max_dict_size {
-        &data[..rb_self.max_dict_size]
+        &data.as_slice()[..rb_self.max_dict_size]
     } else {
-        &data
+        data.as_slice()
     };
     trainer.add_sample(sample);
     Ok(rb::qnil())
