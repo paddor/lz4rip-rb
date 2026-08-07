@@ -3,11 +3,11 @@
 [![CI](https://github.com/paddor/lz4rip-rb/actions/workflows/ci.yml/badge.svg)](https://github.com/paddor/lz4rip-rb/actions/workflows/ci.yml)
 [![Gem Version](https://img.shields.io/gem/v/lz4rip?color=e9573f)](https://rubygems.org/gems/lz4rip)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Ruby](https://img.shields.io/badge/Ruby-%3E%3D%204.0-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
+[![Ruby](https://img.shields.io/badge/Ruby-%3E%3D%203.4-CC342D?logo=ruby&logoColor=white)](https://www.ruby-lang.org)
 
 Ruby bindings for [lz4rip](https://crates.io/crates/lz4rip), a pure-Rust LZ4
-implementation. Built with [magnus](https://github.com/matsadler/magnus) and
-declared Ractor-safe so you can compress from any Ractor without a global lock.
+implementation. Built as an `rb-sys` native extension and declared Ractor-safe
+so you can compress from any Ractor without a global lock.
 
 ## Features
 
@@ -20,7 +20,7 @@ declared Ractor-safe so you can compress from any Ractor without a global lock.
 
 ## Install
 
-Requires Ruby >= 4.0 and a Rust toolchain (for building the native extension):
+Requires Ruby >= 3.4 and a Rust toolchain (for building the native extension):
 
 ```sh
 gem install lz4rip
@@ -78,6 +78,9 @@ codec = Lz4rip::BlockCodec.new(dict: dict)
 ```
 
 ### Ractor safety
+
+On Ruby VMs without Ractor support, the codecs still work normally; the
+Ractor-specific guarantees and examples do not apply.
 
 ```ruby
 codec = Lz4rip::FrameCodec.new

@@ -2,14 +2,14 @@
 name    = "lz4rip"
 version = "0.1.2"
 edition = "2021"
+build   = "build.rs"
 
 [lib]
 name       = "lz4rip"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-lz4    = { version = "0.11.2", git = "https://github.com/paddor/lz4rip", rev = "e0fae3a764a973a4ce2b6c8f62f19672b5cd8948", package = "lz4rip" }
-magnus = { version = "0.8", features = ["rb-sys"] }
+lz4    = { version = "0.11.3", package = "lz4rip" }
 rb-sys = "0.9"
 
 [build-dependencies]

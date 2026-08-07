@@ -3,6 +3,16 @@
 require_relative "test_helper"
 require "objspace"
 
+class Minitest::Test
+  def require_ractor
+    skip "Ractor is unavailable on this Ruby VM" unless defined?(Ractor)
+  end
+
+  def ractor_value(ractor)
+    ractor.respond_to?(:value) ? ractor.value : ractor.take
+  end
+end
+
 class TestVersion < Minitest::Test
   def test_version_is_a_non_empty_string
     assert_instance_of String, Lz4rip::VERSION
@@ -196,8 +206,10 @@ class TestDictionary < Minitest::Test
 
 
   def test_shareable_across_ractors
+    require_ractor
+
     r = Ractor.new(Lz4rip::Dictionary.new(bytes: @bytes)) { |d| [d.bytes, d.id] }
-    got_bytes, got_id = r.value
+    got_bytes, got_id = ractor_value(r)
     assert_equal @bytes.b, got_bytes
     assert_equal Digest::SHA256.digest(@bytes)[0, 4].unpack1("V"), got_id
   end
@@ -660,6 +672,8 @@ class TestDictTrainer < Minitest::Test
 
 
   def test_cannot_cross_ractor_boundaries
+    require_ractor
+
     t = Lz4rip::DictTrainer.new(2048)
     assert_raises(TypeError, Ractor::IsolationError) do
       Ractor.new(t) { |tr| tr.add_sample("data") }
@@ -669,6 +683,11 @@ end
 
 
 class TestRactorSafety < Minitest::Test
+  def setup
+    require_ractor
+  end
+
+
   def test_compress_decompress_inside_ractor
     r = Ractor.new do
       codec = Lz4rip::FrameCodec.new
@@ -676,7 +695,7 @@ class TestRactorSafety < Minitest::Test
       ct    = codec.compress(pt)
       [ct.bytesize, codec.decompress(ct) == pt]
     end
-    size, ok = r.value
+    size, ok = ractor_value(r)
     assert_equal true, ok
     assert_operator size, :>, 0
   end
@@ -689,7 +708,7 @@ class TestRactorSafety < Minitest::Test
       ct  = d.compress(msg)
       d.decompress(ct) == msg
     end
-    assert_equal true, r.value
+    assert_equal true, ractor_value(r)
   end
 
 
@@ -700,7 +719,7 @@ class TestRactorSafety < Minitest::Test
       ct  = c.compress(msg)
       c.decompress(ct, decompressed_size: msg.bytesize) == msg
     end
-    assert_equal true, r.value
+    assert_equal true, ractor_value(r)
   end
 
 
@@ -724,7 +743,7 @@ class TestRactorSafety < Minitest::Test
         :ok
       end
     end
-    results = ractors.map(&:value)
+    results = ractors.map { |r| ractor_value(r) }
     assert_equal [:ok, :ok, :ok, :ok], results
   end
 end
