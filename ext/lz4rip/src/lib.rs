@@ -672,6 +672,11 @@ unsafe extern "C" fn dict_trainer_trained(rb_self: VALUE) -> VALUE {
 
 // ---------- module init ----------
 
+/// # Safety
+///
+/// Ruby calls this function while loading the native extension. The Ruby VM
+/// must be initialized, and the symbol must only be entered by Ruby's extension
+/// loader.
 #[no_mangle]
 pub unsafe extern "C" fn Init_lz4rip() {
     rb::wrap_init(init);
@@ -698,6 +703,7 @@ fn init() -> RbResult<()> {
 
     let codec_class = unsafe { rb::define_class_under(module, c"BlockCodec", rb_sys::rb_cObject)? };
     unsafe {
+        rb::undef_alloc_func(codec_class)?;
         rb::define_singleton_method_1(codec_class, c"_native_new", block_codec_new)?;
         rb::define_method_0(codec_class, c"size", block_codec_size)?;
         rb::define_method_0(codec_class, c"has_dict?", block_codec_has_dict)?;
@@ -708,6 +714,7 @@ fn init() -> RbResult<()> {
     let trainer_class =
         unsafe { rb::define_class_under(module, c"DictTrainer", rb_sys::rb_cObject)? };
     unsafe {
+        rb::undef_alloc_func(trainer_class)?;
         rb::define_singleton_method_1(trainer_class, c"_native_new", dict_trainer_new)?;
         rb::define_method_1(trainer_class, c"add_sample", dict_trainer_add_sample)?;
         rb::define_method_0(trainer_class, c"sample_count", dict_trainer_sample_count)?;
@@ -720,6 +727,7 @@ fn init() -> RbResult<()> {
     let frame_codec_class =
         unsafe { rb::define_class_under(module, c"FrameCodec", rb_sys::rb_cObject)? };
     unsafe {
+        rb::undef_alloc_func(frame_codec_class)?;
         rb::define_singleton_method_2(frame_codec_class, c"_native_new", frame_codec_new)?;
         rb::define_method_1(frame_codec_class, c"compress", frame_codec_compress)?;
         rb::define_method_2(frame_codec_class, c"_decompress", frame_codec_decompress)?;
