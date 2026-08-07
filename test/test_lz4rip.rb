@@ -3,6 +3,12 @@
 require_relative "test_helper"
 require "objspace"
 
+class Minitest::Test
+  def require_ractor
+    skip "Ractor is unavailable on this Ruby VM" unless defined?(Ractor)
+  end
+end
+
 class TestVersion < Minitest::Test
   def test_version_is_a_non_empty_string
     assert_instance_of String, Lz4rip::VERSION
@@ -196,6 +202,8 @@ class TestDictionary < Minitest::Test
 
 
   def test_shareable_across_ractors
+    require_ractor
+
     r = Ractor.new(Lz4rip::Dictionary.new(bytes: @bytes)) { |d| [d.bytes, d.id] }
     got_bytes, got_id = r.value
     assert_equal @bytes.b, got_bytes
@@ -660,6 +668,8 @@ class TestDictTrainer < Minitest::Test
 
 
   def test_cannot_cross_ractor_boundaries
+    require_ractor
+
     t = Lz4rip::DictTrainer.new(2048)
     assert_raises(TypeError, Ractor::IsolationError) do
       Ractor.new(t) { |tr| tr.add_sample("data") }
@@ -669,6 +679,11 @@ end
 
 
 class TestRactorSafety < Minitest::Test
+  def setup
+    require_ractor
+  end
+
+
   def test_compress_decompress_inside_ractor
     r = Ractor.new do
       codec = Lz4rip::FrameCodec.new
