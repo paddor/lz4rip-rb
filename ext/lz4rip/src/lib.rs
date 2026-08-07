@@ -1,19 +1,109 @@
 use magnus::{
-    exception::ExceptionClass, function, method, prelude::*, r_string::RString, value::Opaque,
-    Error, Ruby,
+    exception::ExceptionClass, function, method, prelude::*, r_string::RString, rb_sys::AsRawValue,
+    value::Opaque, Error, Ruby,
 };
 use std::cell::RefCell;
+use std::ffi::c_void;
 use std::io::{Cursor, Read, Write};
+use std::mem::MaybeUninit;
+use std::ptr;
 use std::sync::OnceLock;
 
 use lz4::block::{self, Decompressor, DictCompressor, DictTrainer};
-use lz4::frame::{BlockMode, FrameDecoder, FrameEncoder, FrameInfo};
+use lz4::frame::{BlockMode, FrameDecoder, FrameDecoderOptions, FrameEncoder, FrameInfo};
 
 const COMPRESSOR_HEAP_SIZE: usize = 8192;
 
 const LZ4_FRAME_MAGIC: [u8; 4] = [0x04, 0x22, 0x4d, 0x18];
+const GVL_COMPRESS_THRESHOLD: usize = 256 * 1024;
+const GVL_FRAME_DECOMPRESS_THRESHOLD: usize = 256 * 1024;
 
 static DECOMPRESS_ERROR: OnceLock<Opaque<ExceptionClass>> = OnceLock::new();
+
+type RbWithoutGvlFunc = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type RbUnblockFunc = unsafe extern "C" fn(*mut c_void);
+
+unsafe extern "C" {
+    fn rb_thread_call_without_gvl(
+        func: Option<RbWithoutGvlFunc>,
+        data1: *mut c_void,
+        ubf: Option<RbUnblockFunc>,
+        data2: *mut c_void,
+    ) -> *mut c_void;
+    fn rb_str_locktmp(str: rb_sys::VALUE) -> rb_sys::VALUE;
+    fn rb_str_unlocktmp(str: rb_sys::VALUE) -> rb_sys::VALUE;
+}
+
+fn should_release_compress_gvl(input_len: usize) -> bool {
+    input_len >= GVL_COMPRESS_THRESHOLD
+}
+
+fn should_release_frame_decompress_gvl(input_len: usize) -> bool {
+    input_len >= GVL_FRAME_DECOMPRESS_THRESHOLD
+}
+
+struct WithoutGvlData<F, R> {
+    func: Option<F>,
+    output: MaybeUninit<R>,
+}
+
+unsafe extern "C" fn without_gvl_trampoline<F, R>(data: *mut c_void) -> *mut c_void
+where
+    F: FnOnce() -> R,
+{
+    let data = unsafe { &mut *(data.cast::<WithoutGvlData<F, R>>()) };
+    let func = data.func.take().expect("missing without-GVL function");
+    data.output.write(func());
+    ptr::null_mut()
+}
+
+fn without_gvl<F, R>(func: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let mut data = WithoutGvlData {
+        func: Some(func),
+        output: MaybeUninit::uninit(),
+    };
+    unsafe {
+        rb_thread_call_without_gvl(
+            Some(without_gvl_trampoline::<F, R>),
+            (&mut data as *mut WithoutGvlData<F, R>).cast::<c_void>(),
+            None,
+            ptr::null_mut(),
+        );
+        data.output.assume_init()
+    }
+}
+
+struct RStringLock {
+    raw: rb_sys::VALUE,
+    locked: bool,
+}
+
+impl RStringLock {
+    fn new(s: RString) -> Self {
+        let locked = !s.is_frozen();
+        let raw = s.as_raw();
+        if locked {
+            unsafe {
+                rb_str_locktmp(raw);
+            }
+        }
+        Self { raw, locked }
+    }
+}
+
+impl Drop for RStringLock {
+    fn drop(&mut self) {
+        if self.locked {
+            unsafe {
+                rb_str_unlocktmp(self.raw);
+            }
+        }
+        let _ = rb_sys::rb_gc_guard!(self.raw);
+    }
+}
 
 fn decompress_error(ruby: &Ruby) -> ExceptionClass {
     ruby.get_inner(
@@ -77,11 +167,20 @@ fn block_codec_compress(
     rb_self: &BlockCodec,
     rb_input: RString,
 ) -> Result<RString, Error> {
+    let release_gvl = should_release_compress_gvl(rb_input.len());
+    let _input_lock = release_gvl.then(|| RStringLock::new(rb_input));
     let input: &[u8] = unsafe { rb_input.as_slice() };
 
-    let out = match &rb_self.compressor {
-        None => block::compress(input),
-        Some(comp) => comp.borrow_mut().compress(input),
+    let out = if release_gvl {
+        without_gvl(|| match &rb_self.compressor {
+            None => block::compress(input),
+            Some(comp) => comp.borrow_mut().compress(input),
+        })
+    } else {
+        match &rb_self.compressor {
+            None => block::compress(input),
+            Some(comp) => comp.borrow_mut().compress(input),
+        }
     };
 
     Ok(ruby.str_from_slice(&out))
@@ -139,8 +238,21 @@ fn frame_codec_compress(
     rb_self: &FrameCodec,
     rb_input: RString,
 ) -> Result<RString, Error> {
+    let release_gvl = should_release_compress_gvl(rb_input.len());
+    let _input_lock = release_gvl.then(|| RStringLock::new(rb_input));
     let input: &[u8] = unsafe { rb_input.as_slice() };
 
+    let out = if release_gvl {
+        without_gvl(|| compress_frame(rb_self, input))
+    } else {
+        compress_frame(rb_self, input)
+    }
+    .map_err(|e| Error::new(ruby.exception_runtime_error(), e))?;
+
+    Ok(ruby.str_from_slice(&out))
+}
+
+fn compress_frame(rb_self: &FrameCodec, input: &[u8]) -> Result<Vec<u8>, String> {
     let buf = Vec::new();
     let mut enc = match &rb_self.dict {
         None => {
@@ -149,37 +261,26 @@ fn frame_codec_compress(
         }
         Some(d) => {
             let info = FrameInfo::new().block_mode(BlockMode::Linked);
-            FrameEncoder::with_dictionary(buf, &d.bytes, d.id, Some(info)).map_err(|e| {
-                Error::new(
-                    ruby.exception_runtime_error(),
-                    format!("lz4 frame compress failed: {e}"),
-                )
-            })?
+            FrameEncoder::with_dictionary(buf, &d.bytes, d.id, Some(info))
+                .map_err(|e| format!("lz4 frame compress failed: {e}"))?
         }
     };
 
-    enc.write_all(input).map_err(|e| {
-        Error::new(
-            ruby.exception_runtime_error(),
-            format!("lz4 frame compress failed: {e}"),
-        )
-    })?;
+    enc.write_all(input)
+        .map_err(|e| format!("lz4 frame compress failed: {e}"))?;
 
-    let out = enc.finish().map_err(|e| {
-        Error::new(
-            ruby.exception_runtime_error(),
-            format!("lz4 frame compress failed: {e}"),
-        )
-    })?;
-
-    Ok(ruby.str_from_slice(&out))
+    enc.finish()
+        .map_err(|e| format!("lz4 frame compress failed: {e}"))
 }
 
 fn frame_codec_decompress(
     ruby: &Ruby,
     rb_self: &FrameCodec,
     rb_input: RString,
+    max_decompressed_size: Option<usize>,
 ) -> Result<RString, Error> {
+    let release_gvl = should_release_frame_decompress_gvl(rb_input.len());
+    let _input_lock = release_gvl.then(|| RStringLock::new(rb_input));
     let input: &[u8] = unsafe { rb_input.as_slice() };
 
     if input.len() < 4 || input[..4] != LZ4_FRAME_MAGIC {
@@ -189,20 +290,33 @@ fn frame_codec_decompress(
         ));
     }
 
-    let mut dec = match &rb_self.dict {
-        None => FrameDecoder::new(Cursor::new(input)),
-        Some(d) => FrameDecoder::with_dictionary(Cursor::new(input), &d.bytes, d.id),
-    };
-
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out).map_err(|e| {
-        Error::new(
-            decompress_error(ruby),
-            format!("lz4 frame decode failed: {e}"),
-        )
-    })?;
+    let out = if release_gvl {
+        without_gvl(|| decompress_frame(rb_self, input, max_decompressed_size))
+    } else {
+        decompress_frame(rb_self, input, max_decompressed_size)
+    }
+    .map_err(|e| Error::new(decompress_error(ruby), e))?;
 
     Ok(ruby.str_from_slice(&out))
+}
+
+fn decompress_frame(
+    rb_self: &FrameCodec,
+    input: &[u8],
+    max_decompressed_size: Option<usize>,
+) -> Result<Vec<u8>, String> {
+    let mut dec = FrameDecoder::with_options(
+        Cursor::new(input),
+        FrameDecoderOptions {
+            dictionary: rb_self.dict.as_ref().map(|d| (d.bytes.as_slice(), d.id)),
+            max_output: max_decompressed_size,
+        },
+    );
+
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out)
+        .map_err(|e| format!("lz4 frame decode failed: {e}"))?;
+    Ok(out)
 }
 
 fn frame_codec_size(rb_self: &FrameCodec) -> usize {
@@ -333,7 +447,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     frame_codec_class
         .define_singleton_method("_native_new", function!(frame_codec_initialize, 2))?;
     frame_codec_class.define_method("compress", method!(frame_codec_compress, 1))?;
-    frame_codec_class.define_method("decompress", method!(frame_codec_decompress, 1))?;
+    frame_codec_class.define_method("_decompress", method!(frame_codec_decompress, 2))?;
     frame_codec_class.define_method("size", method!(frame_codec_size, 0))?;
     frame_codec_class.define_method("has_dict?", method!(frame_codec_has_dict, 0))?;
     frame_codec_class.define_method("id", method!(frame_codec_id, 0))?;

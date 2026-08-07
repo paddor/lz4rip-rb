@@ -19,6 +19,7 @@ Gem::Specification.new do |s|
 
   s.metadata["homepage_uri"]      = s.homepage
   s.metadata["source_code_uri"]   = s.homepage
+  s.metadata["documentation_uri"] = "https://rubydoc.info/gems/lz4rip"
   s.metadata["changelog_uri"]     = "#{s.homepage}/blob/main/CHANGELOG.md"
   s.metadata["rubygems_mfa_required"] = "true"
 
