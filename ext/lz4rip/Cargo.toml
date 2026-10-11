@@ -1,6 +1,6 @@
 [package]
 name    = "lz4rip"
-version = "0.1.2"
+version = "0.2.1"
 edition = "2021"
 build   = "build.rs"
 
@@ -9,8 +9,8 @@ name       = "lz4rip"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-lz4    = { version = "0.11.3", package = "lz4rip" }
-rb-sys = "0.9"
+lz4    = { version = "0.11.10", package = "lz4rip" }
+rb-sys = "0.9.130"
 
 [build-dependencies]
-rb-sys = "0.9"
+rb-sys = "0.9.130"

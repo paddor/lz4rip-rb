@@ -40,27 +40,38 @@ fn should_release_frame_decompress_gvl(input_len: usize) -> bool {
     input_len >= GVL_FRAME_DECOMPRESS_THRESHOLD
 }
 
-fn with_mutex<T, R, F>(mutex: &Mutex<T>, release_gvl: bool, name: &str, func: F) -> RbResult<R>
+fn with_mutex<T, R, F>(
+    mutex: &Mutex<T>,
+    release_gvl: bool,
+    name: &str,
+    input: &mut rb::InputBytes,
+    func: F,
+) -> RbResult<R>
 where
-    F: FnOnce(&mut T) -> RbResult<R>,
+    F: FnOnce(&mut T, &[u8]) -> RbResult<R>,
 {
     if release_gvl {
+        input.lock_for_without_gvl(true)?;
         return rb::maybe_without_gvl(true, || {
             let mut guard = mutex
                 .lock()
                 .map_err(|_| RubyErr::runtime(format!("{name} mutex poisoned")))?;
-            func(&mut guard)
-        });
+            func(&mut guard, input.as_slice())
+        })?;
     }
 
     match mutex.try_lock() {
-        Ok(mut guard) => func(&mut guard),
-        Err(TryLockError::WouldBlock) => rb::maybe_without_gvl(true, || {
-            let mut guard = mutex
-                .lock()
-                .map_err(|_| RubyErr::runtime(format!("{name} mutex poisoned")))?;
-            func(&mut guard)
-        }),
+        Ok(mut guard) => func(&mut guard, input.as_slice()),
+        Err(TryLockError::WouldBlock) => {
+            // Even a small input needs protection when contention releases GVL.
+            input.lock_for_without_gvl(true)?;
+            rb::maybe_without_gvl(true, || {
+                let mut guard = mutex
+                    .lock()
+                    .map_err(|_| RubyErr::runtime(format!("{name} mutex poisoned")))?;
+                func(&mut guard, input.as_slice())
+            })?
+        }
         Err(TryLockError::Poisoned(_)) => Err(RubyErr::runtime(format!("{name} mutex poisoned"))),
     }
 }
@@ -122,7 +133,7 @@ fn make_frame_codec_data_type() -> rb_data_type_t {
         },
         parent: std::ptr::null(),
         data: std::ptr::null_mut(),
-        flags: 1,
+        flags: rb::frozen_shareable_flags(),
     }
 }
 
@@ -260,10 +271,14 @@ fn block_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE>
     input.lock_for_without_gvl(release_gvl)?;
 
     let out = match &rb_self.compressor {
-        None => rb::maybe_without_gvl(release_gvl, || Ok(block::compress(input.as_slice())))?,
-        Some(comp) => with_mutex(comp, release_gvl, "BlockCodec compressor", |comp| {
-            Ok(comp.compress(input.as_slice()))
-        })?,
+        None => rb::maybe_without_gvl(release_gvl, || block::compress(input.as_slice()))?,
+        Some(comp) => with_mutex(
+            comp,
+            release_gvl,
+            "BlockCodec compressor",
+            &mut input,
+            |comp, input| Ok(comp.compress(input)),
+        )?,
     };
 
     rb::new_binary_string(&out)
@@ -275,14 +290,18 @@ fn block_codec_decompress_impl(
     decompressed_size: VALUE,
 ) -> RbResult<VALUE> {
     let rb_self = unsafe { block_codec_ref(rb_self)? };
-    let compressed = rb::input_bytes(rb_input)?;
     let decompressed_size = rb::value_to_usize(decompressed_size)?;
+    let mut compressed = rb::input_bytes(rb_input)?;
 
     let result = match &rb_self.decompressor {
         None => block::decompress(compressed.as_slice(), decompressed_size),
-        Some(decomp) => with_mutex(decomp, false, "BlockCodec decompressor", |decomp| {
-            Ok(decomp.decompress(compressed.as_slice(), decompressed_size))
-        })?,
+        Some(decomp) => with_mutex(
+            decomp,
+            false,
+            "BlockCodec decompressor",
+            &mut compressed,
+            |decomp, compressed| Ok(decomp.decompress(compressed, decompressed_size)),
+        )?,
     };
 
     match result {
@@ -331,23 +350,16 @@ struct DictBound {
 
 fn frame_codec_new_impl(class: VALUE, rb_dict: VALUE, id: VALUE) -> RbResult<VALUE> {
     let id = rb::value_to_u32(id)?;
-    let dict = if rb_dict == rb::qnil() {
-        None
-    } else {
-        let rb_dict = rb::string_value(rb_dict)?;
-        rb::freeze_value(rb_dict)?;
-        Some(DictBound {
-            bytes: rb::value_to_bytes(rb_dict)?,
-            id,
-        })
-    };
-    unsafe {
+    let dict = rb::value_to_option_bytes(rb_dict)?.map(|bytes| DictBound { bytes, id });
+    let codec = unsafe {
         rb::wrap_typed_data(
             class,
             Box::new(FrameCodec { dict }),
             frame_codec_data_type(),
-        )
-    }
+        )?
+    };
+    rb::make_shareable(codec)?;
+    Ok(codec)
 }
 
 fn frame_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE> {
@@ -356,7 +368,7 @@ fn frame_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE>
     let release_gvl = should_release_compress_gvl(input.len());
     input.lock_for_without_gvl(release_gvl)?;
 
-    let out = rb::maybe_without_gvl(release_gvl, || compress_frame(rb_self, input.as_slice()))
+    let out = rb::maybe_without_gvl(release_gvl, || compress_frame(rb_self, input.as_slice()))?
         .map_err(RubyErr::runtime)?;
 
     rb::new_binary_string(&out)
@@ -389,8 +401,8 @@ fn frame_codec_decompress_impl(
     max_decompressed_size: VALUE,
 ) -> RbResult<VALUE> {
     let rb_self = unsafe { frame_codec_ref(rb_self)? };
-    let mut input = rb::input_bytes(rb_input)?;
     let max_decompressed_size = rb::value_to_option_usize(max_decompressed_size)?;
+    let mut input = rb::input_bytes(rb_input)?;
     let release_gvl = should_release_frame_decompress_gvl(input.len());
     input.lock_for_without_gvl(release_gvl)?;
 
@@ -403,7 +415,7 @@ fn frame_codec_decompress_impl(
 
     let out = rb::maybe_without_gvl(release_gvl, || {
         decompress_frame(rb_self, input.as_slice(), max_decompressed_size)
-    })
+    })?
     .map_err(|e| RubyErr::new(decompress_error(), e))?;
 
     rb::new_binary_string(&out)
@@ -496,6 +508,7 @@ fn dict_trainer_new_impl(class: VALUE, max_dict_size: VALUE) -> RbResult<VALUE> 
 }
 
 fn dict_trainer_add_sample_impl(rb_self: VALUE, rb_data: VALUE) -> RbResult<VALUE> {
+    let data = rb::input_bytes(rb_data)?;
     let rb_self = unsafe { dict_trainer_ref(rb_self)? };
     let mut borrow = rb_self
         .inner
@@ -504,7 +517,6 @@ fn dict_trainer_add_sample_impl(rb_self: VALUE, rb_data: VALUE) -> RbResult<VALU
     let trainer = borrow
         .as_mut()
         .ok_or_else(|| RubyErr::runtime("DictTrainer already consumed by #train"))?;
-    let data = rb::input_bytes(rb_data)?;
     let sample = if data.len() > rb_self.max_dict_size {
         &data.as_slice()[..rb_self.max_dict_size]
     } else {
