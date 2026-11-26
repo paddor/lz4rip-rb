@@ -442,8 +442,12 @@ describe Lz4rip::BlockCodec, "with a dictionary" do
   end
 
 
-  it "size is stream plus dict" do
-    assert_equal Lz4rip.block_stream_size + @dict.bytesize, @codec.size
+  it "size counts the dict copies, and the tables from the first compress" do
+    assert_equal 2 * @dict.bytesize, @codec.size
+    @codec.decompress(Lz4rip::BlockCodec.new(dict: @dict).compress(@dict * 3), decompressed_size: 3 * @dict.bytesize)
+    assert_equal 2 * @dict.bytesize, @codec.size
+    @codec.compress(@dict)
+    assert_equal 2 * Lz4rip.block_stream_size + 2 * @dict.bytesize, @codec.size
   end
 end
 
@@ -511,6 +515,105 @@ describe Lz4rip::BlockCodec, "bounded decompression" do
         # expected for most mutations
       end
     end
+  end
+end
+
+
+describe Lz4rip::BlockCodec, "with the ratio profile" do
+  # Words from a skewed vocabulary: text where the ratio profile finds more.
+  TEXT = begin
+    rng   = Random.new(42)
+    vocab = Array.new(400) { Array.new(rng.rand(2..9)) { (97 + rng.rand(26)).chr }.join }
+    Array.new(6_000) { vocab[(rng.rand**2 * vocab.size).to_i] }.join(" ").b
+  end
+
+
+  it "rejects an unknown profile" do
+    assert_raises(ArgumentError) { Lz4rip::BlockCodec.new(profile: :small) }
+  end
+
+
+  it "round trips and a fast codec decodes it" do
+    ratio = Lz4rip::BlockCodec.new(profile: :ratio)
+    fast  = Lz4rip::BlockCodec.new
+    [0, 1, 100, 4096, 5000, 100_000].each do |n|
+      pt = TEXT * (n / TEXT.bytesize + 1)
+      pt = pt.byteslice(0, n)
+      ct = ratio.compress(pt)
+      assert_equal pt, ratio.decompress(ct, decompressed_size: n)
+      assert_equal pt, fast.decompress(ct, decompressed_size: n)
+    end
+  end
+
+
+  it "compresses text smaller than the fast profile" do
+    ratio = Lz4rip::BlockCodec.new(profile: :ratio).compress(TEXT)
+    fast  = Lz4rip::BlockCodec.new.compress(TEXT)
+    assert_operator ratio.bytesize, :<, fast.bytesize
+  end
+
+
+  it "takes a dictionary" do
+    dict  = TEXT.byteslice(0, 2_000)
+    ratio = Lz4rip::BlockCodec.new(dict: dict, profile: :ratio)
+    fast  = Lz4rip::BlockCodec.new(dict: dict)
+    msg   = TEXT.byteslice(500, 600)
+    ct    = ratio.compress(msg)
+    assert_predicate ratio, :has_dict?
+    assert_equal msg, fast.decompress(ct, decompressed_size: msg.bytesize)
+    assert_operator ct.bytesize, :<, Lz4rip::BlockCodec.new(profile: :ratio).compress(msg).bytesize
+  end
+
+
+  it "size counts the tables as they are made" do
+    codec = Lz4rip::BlockCodec.new(profile: :ratio)
+    assert_equal 0, codec.size
+    codec.compress(TEXT.byteslice(0, 1_000))
+    assert_equal 8 * 1024, codec.size
+    codec.compress(TEXT.byteslice(0, 5_000))
+    assert_equal 72 * 1024, codec.size
+  end
+
+
+  it "size with a dictionary counts its tables and both dict copies" do
+    dict  = TEXT.byteslice(0, 2_000)
+    codec = Lz4rip::BlockCodec.new(dict: dict, profile: :ratio)
+    assert_equal 2 * dict.bytesize, codec.size
+    codec.compress(TEXT.byteslice(0, 1_000))
+    assert_equal 2 * dict.bytesize + 16 * 1024, codec.size
+  end
+end
+
+
+describe Lz4rip::BlockCodec, "declared size" do
+  before do
+    @codec = Lz4rip::BlockCodec.new
+    @pt    = "X" * 10_000
+    @ct    = @codec.compress(@pt)
+  end
+
+
+  it "rejects a size the input cannot decode to" do
+    error = assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress(@ct, decompressed_size: 255 * @ct.bytesize + 1)
+    end
+    assert_match(/cannot decode/, error.message)
+    assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress("\x00".b, decompressed_size: 1 << 60)
+    end
+  end
+
+
+  it "accepts the largest size the input can decode to" do
+    assert_equal @pt, @codec.decompress(@ct, decompressed_size: 255 * @ct.bytesize)
+  end
+
+
+  it "rejects a size above max_decompressed_size:" do
+    assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress(@ct, decompressed_size: @pt.bytesize, max_decompressed_size: @pt.bytesize - 1)
+    end
+    assert_equal @pt, @codec.decompress(@ct, decompressed_size: @pt.bytesize, max_decompressed_size: @pt.bytesize)
   end
 end
 
