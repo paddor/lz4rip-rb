@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
 - Update the `lz4rip` crate dependency to 0.12.9, for the ratio profile with
   a dictionary and the compressors' heap sizes.
 - `BlockCodec.new(profile: :ratio)`, with or without `dict:`, compresses to

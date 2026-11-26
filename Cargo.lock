@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "lz4rip"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "lz4rip 0.12.9",
  "rb-sys",
