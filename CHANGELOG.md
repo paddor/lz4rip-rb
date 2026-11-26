@@ -13,6 +13,9 @@
   the block cannot decode to (more than 255 times its length) before
   allocating, and takes an optional `max_decompressed_size:`, as
   `FrameCodec#decompress` does.
+- `BlockCodec` makes its compressor on its first `#compress`, so a codec
+  that only decompresses holds only its dictionary. A dictionary codec held
+  16 KiB of compressor tables from the start.
 - `BlockCodec#size` reports the bytes the codec holds: its compressor
   tables, including those a ratio codec makes on first use, and its copies
   of the dictionary. A dictionary codec reported one table and one copy.

@@ -43,7 +43,9 @@ module Lz4rip
     # decodes with any LZ4 decoder. It holds an 8 KB table, plus 64 KB from
     # its first input above 4 KiB. With a dictionary it hashes the dictionary
     # once and holds 16 KB of tables while input and dictionary stay within
-    # 4 KiB, 64 KB more for larger inputs.
+    # 4 KiB, 64 KB more for larger inputs. Either profile makes its compressor
+    # on the first `#compress`, so a codec that only decompresses holds only
+    # its dictionary.
     #
     # @param dict [Dictionary, String, nil] optional LZ4 dictionary
     # @param profile [Symbol] `:fast` or `:ratio`

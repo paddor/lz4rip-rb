@@ -259,8 +259,42 @@ impl BlockCompressor {
     }
 }
 
+/// A codec's compressor, made by its first `compress`: a codec that only
+/// decompresses, as a receiving connection's does, holds no tables.
+enum CompressorSlot {
+    /// The dictionary to make it with, if any.
+    Unmade(Option<Vec<u8>>),
+    Made(Box<BlockCompressor>),
+}
+
+impl CompressorSlot {
+    fn get(&mut self, ratio: bool) -> &mut BlockCompressor {
+        if let Self::Unmade(dict) = self {
+            let compressor = match (dict.take(), ratio) {
+                (None, _) => BlockCompressor::Ratio(RatioCompressor::new()),
+                (Some(bytes), false) => BlockCompressor::Dict(DictCompressor::new(&bytes)),
+                (Some(bytes), true) => BlockCompressor::RatioDict(RatioDictCompressor::new(&bytes)),
+            };
+            *self = Self::Made(Box::new(compressor));
+        }
+        match self {
+            Self::Made(compressor) => compressor,
+            Self::Unmade(_) => unreachable!("made above"),
+        }
+    }
+
+    fn heap_size(&self) -> usize {
+        match self {
+            Self::Unmade(dict) => dict.as_ref().map_or(0, Vec::capacity),
+            Self::Made(compressor) => compressor.heap_size(),
+        }
+    }
+}
+
 struct BlockCodec {
-    compressor: Option<Mutex<BlockCompressor>>,
+    /// None for the fast profile without a dictionary, which compresses
+    /// with `block::compress`.
+    compressor: Option<Mutex<CompressorSlot>>,
     decompressor: Option<Mutex<Decompressor>>,
     /// The ratio profile, which releases the GVL from a smaller input.
     ratio: bool,
@@ -286,17 +320,10 @@ impl BlockCodec {
 fn block_codec_new_impl(class: VALUE, rb_dict: VALUE, rb_ratio: VALUE) -> RbResult<VALUE> {
     let ratio = rb_ratio == rb::qtrue();
     let dict = rb::value_to_option_bytes(rb_dict)?;
-    let compressor = match (&dict, ratio) {
-        (None, false) => None,
-        (None, true) => Some(BlockCompressor::Ratio(RatioCompressor::new())),
-        (Some(bytes), false) => Some(BlockCompressor::Dict(DictCompressor::new(bytes))),
-        (Some(bytes), true) => Some(BlockCompressor::RatioDict(RatioDictCompressor::new(bytes))),
-    };
-    let decompressor = dict.map(|bytes| Decompressor::with_dict(&bytes));
+    let decompressor = dict.as_deref().map(Decompressor::with_dict);
+    let compressor = (dict.is_some() || ratio).then_some(CompressorSlot::Unmade(dict));
     let codec = BlockCodec {
-        compressor_heap: AtomicUsize::new(
-            compressor.as_ref().map_or(0, BlockCompressor::heap_size),
-        ),
+        compressor_heap: AtomicUsize::new(compressor.as_ref().map_or(0, CompressorSlot::heap_size)),
         decompressor_heap: decompressor.as_ref().map_or(0, Decompressor::heap_size),
         compressor: compressor.map(Mutex::new),
         decompressor: decompressor.map(Mutex::new),
@@ -329,12 +356,13 @@ fn block_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE>
             release_gvl,
             "BlockCodec compressor",
             &mut input,
-            |comp, input| {
-                let out = comp.compress(input);
-                // A ratio compressor makes its larger tables on first use.
+            |slot, input| {
+                let out = slot.get(rb_self.ratio).compress(input);
+                // The first call makes the compressor, and a ratio one makes
+                // its larger tables on first use.
                 rb_self
                     .compressor_heap
-                    .store(comp.heap_size(), Ordering::Relaxed);
+                    .store(slot.heap_size(), Ordering::Relaxed);
                 Ok(out)
             },
         )?,

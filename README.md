@@ -66,8 +66,9 @@ codec.decompress(compressed, decompressed_size: peer_size, max_decompressed_size
 `profile: :ratio` compresses to smaller output, more slowly. Any LZ4 decoder
 reads it, so only the sender needs it. It holds an 8 KB table, plus 64 KB from
 its first input above 4 KiB; with a dictionary, 16 KB of tables while input and
-dictionary stay within 4 KiB, 64 KB more for larger inputs. `#size` reports the
-bytes a codec holds.
+dictionary stay within 4 KiB, 64 KB more for larger inputs. A codec makes its
+compressor on its first `#compress`, so one that only decompresses holds only
+its dictionary. `#size` reports the bytes a codec holds.
 
 ```ruby
 codec = Lz4rip::BlockCodec.new(profile: :ratio, dict: dict)

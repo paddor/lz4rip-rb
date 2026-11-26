@@ -442,7 +442,11 @@ describe Lz4rip::BlockCodec, "with a dictionary" do
   end
 
 
-  it "size counts both dict tables and both dict copies" do
+  it "size counts the dict copies, and the tables from the first compress" do
+    assert_equal 2 * @dict.bytesize, @codec.size
+    @codec.decompress(Lz4rip::BlockCodec.new(dict: @dict).compress(@dict * 3), decompressed_size: 3 * @dict.bytesize)
+    assert_equal 2 * @dict.bytesize, @codec.size
+    @codec.compress(@dict)
     assert_equal 2 * Lz4rip.block_stream_size + 2 * @dict.bytesize, @codec.size
   end
 end
@@ -563,7 +567,7 @@ describe Lz4rip::BlockCodec, "with the ratio profile" do
 
   it "size counts the tables as they are made" do
     codec = Lz4rip::BlockCodec.new(profile: :ratio)
-    assert_equal 8 * 1024, codec.size
+    assert_equal 0, codec.size
     codec.compress(TEXT.byteslice(0, 1_000))
     assert_equal 8 * 1024, codec.size
     codec.compress(TEXT.byteslice(0, 5_000))
