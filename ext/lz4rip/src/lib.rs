@@ -51,7 +51,7 @@ where
     F: FnOnce(&mut T, &[u8]) -> RbResult<R>,
 {
     if release_gvl {
-        input.lock_for_without_gvl(true)?;
+        input.freeze_for_without_gvl(true)?;
         return rb::maybe_without_gvl(true, || {
             let mut guard = mutex
                 .lock()
@@ -64,7 +64,7 @@ where
         Ok(mut guard) => func(&mut guard, input.as_slice()),
         Err(TryLockError::WouldBlock) => {
             // Even a small input needs protection when contention releases GVL.
-            input.lock_for_without_gvl(true)?;
+            input.freeze_for_without_gvl(true)?;
             rb::maybe_without_gvl(true, || {
                 let mut guard = mutex
                     .lock()
@@ -268,7 +268,7 @@ fn block_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE>
     let rb_self = unsafe { block_codec_ref(rb_self)? };
     let mut input = rb::input_bytes(rb_input)?;
     let release_gvl = should_release_compress_gvl(input.len());
-    input.lock_for_without_gvl(release_gvl)?;
+    input.freeze_for_without_gvl(release_gvl)?;
 
     let out = match &rb_self.compressor {
         None => rb::maybe_without_gvl(release_gvl, || block::compress(input.as_slice()))?,
@@ -366,7 +366,7 @@ fn frame_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE>
     let rb_self = unsafe { frame_codec_ref(rb_self)? };
     let mut input = rb::input_bytes(rb_input)?;
     let release_gvl = should_release_compress_gvl(input.len());
-    input.lock_for_without_gvl(release_gvl)?;
+    input.freeze_for_without_gvl(release_gvl)?;
 
     let out = rb::maybe_without_gvl(release_gvl, || compress_frame(rb_self, input.as_slice()))?
         .map_err(RubyErr::runtime)?;
@@ -403,8 +403,6 @@ fn frame_codec_decompress_impl(
     let rb_self = unsafe { frame_codec_ref(rb_self)? };
     let max_decompressed_size = rb::value_to_option_usize(max_decompressed_size)?;
     let mut input = rb::input_bytes(rb_input)?;
-    let release_gvl = should_release_frame_decompress_gvl(input.len());
-    input.lock_for_without_gvl(release_gvl)?;
 
     if input.len() < 4 || input.as_slice()[..4] != LZ4_FRAME_MAGIC {
         return Err(RubyErr::new(
@@ -412,6 +410,9 @@ fn frame_codec_decompress_impl(
             "lz4 frame decode failed: bad magic (input is not an LZ4 frame)",
         ));
     }
+
+    let release_gvl = should_release_frame_decompress_gvl(input.len());
+    input.freeze_for_without_gvl(release_gvl)?;
 
     let out = rb::maybe_without_gvl(release_gvl, || {
         decompress_frame(rb_self, input.as_slice(), max_decompressed_size)
