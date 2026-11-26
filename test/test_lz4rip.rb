@@ -640,6 +640,20 @@ describe Lz4rip::DictTrainer do
   end
 
 
+  it "trains tiny dicts" do
+    (4..32).each do |size|
+      t = Lz4rip::DictTrainer.new(size)
+      20.times { |i| t.add_sample(json_msg(i)) }
+      dict = t.train
+      assert_operator dict.bytesize, :<=, size
+
+      codec = Lz4rip::BlockCodec.new(dict: dict)
+      msg   = json_msg(999)
+      assert_equal msg, codec.decompress(codec.compress(msg), decompressed_size: msg.bytesize)
+    end
+  end
+
+
   it "returns empty dict with fewer than 2 samples" do
     t = Lz4rip::DictTrainer.new(2048)
     t.add_sample("hello world")
@@ -798,7 +812,7 @@ end
 
 
 describe "Lz4rip native interruptions" do
-  it "interrupted compression unlocks input and releases codec" do
+  it "interrupted compression releases codec and leaves input mutable" do
     interrupted_error = Class.new(StandardError)
     skip "requires MRI GVL" unless RUBY_ENGINE == "ruby"
 
@@ -813,7 +827,7 @@ describe "Lz4rip native interruptions" do
       worker.report_on_exception = false
 
       begin
-        assert wait_for_input_lock(input, worker), "compression did not lock input"
+        assert wait_without_gvl(worker), "compression did not release the GVL"
         worker.raise(interrupted_error)
         assert_instance_of interrupted_error, worker.value
         input.replace("usable")
@@ -827,7 +841,7 @@ describe "Lz4rip native interruptions" do
   end
 
 
-  it "killed compression unlocks input" do
+  it "killed compression leaves input mutable" do
     skip "requires MRI GVL" unless RUBY_ENGINE == "ruby"
 
     codec = Lz4rip::FrameCodec.new
@@ -835,7 +849,7 @@ describe "Lz4rip native interruptions" do
     worker = Thread.new { codec.compress(input) }
     worker.report_on_exception = false
     begin
-      assert wait_for_input_lock(input, worker), "compression did not lock input"
+      assert wait_without_gvl(worker), "compression did not release the GVL"
       worker.kill
       assert_nil worker.value
       input.replace("usable")
@@ -847,29 +861,49 @@ describe "Lz4rip native interruptions" do
   end
 
 
-  it "contended small compression locks input" do
+  it "compression without the GVL keeps the input it was given" do
     skip "requires MRI GVL" unless RUBY_ENGINE == "ruby"
 
     codec = Lz4rip::BlockCodec.new(dict: "dictionary")
     large_input = Random.bytes(128 * 1024 * 1024)
+    large_expected = large_input.byteslice(0, 4096)
     small_input = +"small mutable input"
+    small_expected = small_input.dup
     large_worker = Thread.new { codec.compress(large_input) }
     small_worker = nil
 
     begin
-      assert wait_for_input_lock(large_input, large_worker), "large compression did not lock input"
+      assert wait_without_gvl(large_worker), "large compression did not release the GVL"
       small_worker = Thread.new { codec.compress(small_input) }
-      assert wait_for_input_lock(small_input, small_worker), "contended small input was not locked"
-      assert_raises(RuntimeError) { small_input.replace("changed") }
-      small_compressed = small_worker.value
-      large_worker.value
-      assert_equal small_input, decompress(codec, small_compressed, small_input.bytesize)
-      small_input.replace("usable")
-      assert_equal "usable", small_input
+      assert wait_without_gvl(small_worker), "contended small compression did not release the GVL"
+      small_input.replace("changed")
+      large_input.bytesplice(0, 4096, "\0" * 4096)
+      assert_equal "changed", small_input
+      assert_equal small_expected, decompress(codec, small_worker.value, small_expected.bytesize)
+      large_output = decompress(codec, large_worker.value, large_input.bytesize)
+      assert_equal large_expected, large_output.byteslice(0, 4096)
     ensure
       [small_worker, large_worker].compact.each do |worker|
         worker.kill if worker.alive?
         worker.join
+      end
+    end
+  end
+
+
+  it "threads compress one mutable input at once" do
+    input = Random.bytes(4 * 1024 * 1024)
+    expected = input.dup
+    workers = 4.times.map do
+      Thread.new do
+        codec = Lz4rip::FrameCodec.new
+        3.times.map { codec.compress(input) }
+      end
+    end
+
+    workers.each do |worker|
+      worker.value.each do |compressed|
+        assert_equal expected, decompress(Lz4rip::FrameCodec.new, compressed, expected.bytesize)
       end
     end
   end
@@ -880,14 +914,11 @@ describe "Lz4rip native interruptions" do
     codec.is_a?(Lz4rip::BlockCodec) ? codec.decompress(compressed, decompressed_size: size) : codec.decompress(compressed)
   end
 
-  def wait_for_input_lock(input, worker)
+  # A thread inside a native call without the GVL reports "sleep".
+  def wait_without_gvl(worker)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
     while worker.alive? && Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
-      begin
-        input.setbyte(0, input.getbyte(0))
-      rescue RuntimeError
-        return true
-      end
+      return true if worker.status == "sleep"
       Thread.pass
     end
     false
