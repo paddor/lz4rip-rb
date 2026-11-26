@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- `BlockCodec#decompress` raises `DecompressError` for a `decompressed_size:`
+  the block cannot decode to (more than 255 times its length) before
+  allocating, and takes an optional `max_decompressed_size:`, as
+  `FrameCodec#decompress` does.
+
 ## [0.2.2] - 2026-11-26
 
 - Update the `lz4rip` crate dependency to 0.12.7. Block decompression caps

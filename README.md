@@ -54,7 +54,14 @@ original   = codec.decompress(compressed, decompressed_size: 12_000)
 ```
 
 Block decompression requires the original size up front. This is by design: LZ4
-block format does not store it, so the caller must track it.
+block format does not store it, so the caller must track it. A size the block
+cannot decode to (more than 255 times its length) raises `DecompressError`
+before anything is allocated, and `max_decompressed_size:` sets a lower limit, as
+for `FrameCodec`:
+
+```ruby
+codec.decompress(compressed, decompressed_size: peer_size, max_decompressed_size: 1 << 20)
+```
 
 ### Dictionary compression
 

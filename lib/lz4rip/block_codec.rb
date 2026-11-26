@@ -23,13 +23,6 @@ module Lz4rip
   #   @param bytes [String] uncompressed bytes
   #   @return [String]
   #
-  # @!method decompress(bytes, decompressed_size:)
-  #   Decompress a raw LZ4 block.
-  #   @param bytes [String] compressed LZ4 block
-  #   @param decompressed_size [Integer] original byte size
-  #   @return [String]
-  #   @raise [DecompressError]
-  #
   # @!method _decompress(bytes, decompressed_size)
   #   Native decompression entry used by #decompress.
   #   @param bytes [String] compressed LZ4 block
@@ -48,7 +41,24 @@ module Lz4rip
     end
 
 
-    def decompress(bytes, decompressed_size:)
+    # Decompress a raw LZ4 block.
+    #
+    # `decompressed_size` is the original size, often declared by a peer. A
+    # size the block cannot decode to (more than 255 times its length), or
+    # above `max_decompressed_size`, raises before anything is allocated for
+    # it.
+    #
+    # @param bytes [String] compressed LZ4 block
+    # @param decompressed_size [Integer] original byte size
+    # @param max_decompressed_size [Integer, nil] largest size to accept
+    # @return [String]
+    # @raise [DecompressError]
+    def decompress(bytes, decompressed_size:, max_decompressed_size: nil)
+      if max_decompressed_size && decompressed_size > max_decompressed_size
+        raise DecompressError,
+          "decompressed size #{decompressed_size} exceeds max_decompressed_size #{max_decompressed_size}"
+      end
+
       _decompress(bytes, decompressed_size)
     end
   end

@@ -292,6 +292,17 @@ fn block_codec_decompress_impl(
     let rb_self = unsafe { block_codec_ref(rb_self)? };
     let decompressed_size = rb::value_to_usize(decompressed_size)?;
     let mut compressed = rb::input_bytes(rb_input)?;
+    // The size comes from a peer: refuse one the input cannot decode to
+    // before the decoder allocates for it.
+    if decompressed_size > compressed.len().saturating_mul(LZ4_MAX_EXPANSION) {
+        return Err(RubyErr::new(
+            decompress_error(),
+            format!(
+                "lz4 block of {} bytes cannot decode to {decompressed_size} bytes",
+                compressed.len()
+            ),
+        ));
+    }
 
     let result = match &rb_self.decompressor {
         None => block::decompress(compressed.as_slice(), decompressed_size),
@@ -487,6 +498,10 @@ unsafe extern "C" fn frame_codec_id(rb_self: VALUE) -> VALUE {
 // ---------- DictTrainer ----------
 
 const LZ4_MAX_DISTANCE: usize = 65535;
+
+/// The most bytes one byte of an LZ4 block decodes to: a match length
+/// extension byte adds up to 255.
+const LZ4_MAX_EXPANSION: usize = 255;
 
 struct RbDictTrainer {
     inner: Mutex<Option<DictTrainer>>,

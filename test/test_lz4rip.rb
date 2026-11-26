@@ -515,6 +515,39 @@ describe Lz4rip::BlockCodec, "bounded decompression" do
 end
 
 
+describe Lz4rip::BlockCodec, "declared size" do
+  before do
+    @codec = Lz4rip::BlockCodec.new
+    @pt    = "X" * 10_000
+    @ct    = @codec.compress(@pt)
+  end
+
+
+  it "rejects a size the input cannot decode to" do
+    error = assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress(@ct, decompressed_size: 255 * @ct.bytesize + 1)
+    end
+    assert_match(/cannot decode/, error.message)
+    assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress("\x00".b, decompressed_size: 1 << 60)
+    end
+  end
+
+
+  it "accepts the largest size the input can decode to" do
+    assert_equal @pt, @codec.decompress(@ct, decompressed_size: 255 * @ct.bytesize)
+  end
+
+
+  it "rejects a size above max_decompressed_size:" do
+    assert_raises(Lz4rip::DecompressError) do
+      @codec.decompress(@ct, decompressed_size: @pt.bytesize, max_decompressed_size: @pt.bytesize - 1)
+    end
+    assert_equal @pt, @codec.decompress(@ct, decompressed_size: @pt.bytesize, max_decompressed_size: @pt.bytesize)
+  end
+end
+
+
 describe Lz4rip::BlockCodec, "with the wrong dictionary" do
   before do
     @dict_a = ("header version=1 type=message field=" * 3).b
