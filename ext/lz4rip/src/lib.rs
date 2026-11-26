@@ -3,9 +3,12 @@ mod rb;
 use std::ffi::c_void;
 use std::io::{Cursor, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 
-use lz4::block::{self, Decompressor, DictCompressor, DictTrainer};
+use lz4::block::{
+    self, Decompressor, DictCompressor, DictTrainer, RatioCompressor, RatioDictCompressor,
+};
 use lz4::frame::{BlockMode, FrameDecoder, FrameDecoderOptions, FrameEncoder, FrameInfo};
 use rb_sys::{rb_data_type_struct__bindgen_ty_1, rb_data_type_t, size_t, VALUE};
 
@@ -15,6 +18,9 @@ const COMPRESSOR_HEAP_SIZE: usize = 8192;
 
 const LZ4_FRAME_MAGIC: [u8; 4] = [0x04, 0x22, 0x4d, 0x18];
 const GVL_COMPRESS_THRESHOLD: usize = 256 * 1024;
+/// The ratio profile compresses 128 KiB about as slowly as the fast one
+/// compresses 256 KiB, or slower (Silesia text, binaries, x-ray).
+const GVL_RATIO_COMPRESS_THRESHOLD: usize = 128 * 1024;
 const GVL_FRAME_DECOMPRESS_THRESHOLD: usize = 256 * 1024;
 
 static DECOMPRESS_ERROR: OnceLock<GlobalValue> = OnceLock::new();
@@ -227,24 +233,74 @@ unsafe extern "C" fn lz4rip_block_stream_size(_module: VALUE) -> VALUE {
 
 // ---------- BlockCodec ----------
 
-struct BlockCodec {
-    compressor: Option<Mutex<DictCompressor>>,
-    decompressor: Option<Mutex<Decompressor>>,
-    dict_len: usize,
+/// A block codec's compressor state. The fast profile without a dictionary
+/// keeps none: it compresses with `block::compress`.
+enum BlockCompressor {
+    Dict(DictCompressor),
+    Ratio(RatioCompressor),
+    RatioDict(RatioDictCompressor),
 }
 
-fn block_codec_new_impl(class: VALUE, rb_dict: VALUE) -> RbResult<VALUE> {
-    let codec = match rb::value_to_option_bytes(rb_dict)? {
-        None => BlockCodec {
-            compressor: None,
-            decompressor: None,
-            dict_len: 0,
-        },
-        Some(bytes) => BlockCodec {
-            compressor: Some(Mutex::new(DictCompressor::new(&bytes))),
-            decompressor: Some(Mutex::new(Decompressor::with_dict(&bytes))),
-            dict_len: bytes.len(),
-        },
+impl BlockCompressor {
+    fn compress(&mut self, input: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Dict(comp) => comp.compress(input),
+            Self::Ratio(comp) => comp.compress(input),
+            Self::RatioDict(comp) => comp.compress(input),
+        }
+    }
+
+    fn heap_size(&self) -> usize {
+        match self {
+            Self::Dict(comp) => comp.heap_size(),
+            Self::Ratio(comp) => comp.heap_size(),
+            Self::RatioDict(comp) => comp.heap_size(),
+        }
+    }
+}
+
+struct BlockCodec {
+    compressor: Option<Mutex<BlockCompressor>>,
+    decompressor: Option<Mutex<Decompressor>>,
+    /// The ratio profile, which releases the GVL from a smaller input.
+    ratio: bool,
+    /// The compressor's heap bytes, kept up to date by `compress` so `#size`
+    /// never waits on a compression that released the GVL.
+    compressor_heap: AtomicUsize,
+    /// The decompressor's heap bytes: its copy of the dictionary.
+    decompressor_heap: usize,
+}
+
+impl BlockCodec {
+    /// Whether compressing `input_len` bytes takes long enough to release
+    /// the GVL for.
+    fn should_release_compress_gvl(&self, input_len: usize) -> bool {
+        if self.ratio {
+            input_len >= GVL_RATIO_COMPRESS_THRESHOLD
+        } else {
+            should_release_compress_gvl(input_len)
+        }
+    }
+}
+
+fn block_codec_new_impl(class: VALUE, rb_dict: VALUE, rb_ratio: VALUE) -> RbResult<VALUE> {
+    let ratio = rb_ratio == rb::qtrue();
+    let dict = rb::value_to_option_bytes(rb_dict)?;
+    let compressor = match (&dict, ratio) {
+        (None, false) => None,
+        (None, true) => Some(BlockCompressor::Ratio(RatioCompressor::new())),
+        (Some(bytes), false) => Some(BlockCompressor::Dict(DictCompressor::new(bytes))),
+        (Some(bytes), true) => Some(BlockCompressor::RatioDict(RatioDictCompressor::new(bytes))),
+    };
+    let decompressor = dict.map(|bytes| Decompressor::with_dict(&bytes));
+    let codec = BlockCodec {
+        compressor_heap: AtomicUsize::new(
+            compressor.as_ref().map_or(0, BlockCompressor::heap_size),
+        ),
+        decompressor_heap: decompressor.as_ref().map_or(0, Decompressor::heap_size),
+        compressor: compressor.map(Mutex::new),
+        decompressor: decompressor.map(Mutex::new),
+        ratio,
     };
 
     unsafe { rb::wrap_typed_data(class, Box::new(codec), block_codec_data_type()) }
@@ -252,22 +308,18 @@ fn block_codec_new_impl(class: VALUE, rb_dict: VALUE) -> RbResult<VALUE> {
 
 fn block_codec_size_impl(rb_self: VALUE) -> RbResult<VALUE> {
     let rb_self = unsafe { block_codec_ref(rb_self)? };
-    if rb_self.compressor.is_some() {
-        rb::usize_value(COMPRESSOR_HEAP_SIZE + rb_self.dict_len)
-    } else {
-        rb::usize_value(0)
-    }
+    rb::usize_value(rb_self.compressor_heap.load(Ordering::Relaxed) + rb_self.decompressor_heap)
 }
 
 fn block_codec_has_dict_impl(rb_self: VALUE) -> RbResult<VALUE> {
     let rb_self = unsafe { block_codec_ref(rb_self)? };
-    Ok(rb::bool_value(rb_self.compressor.is_some()))
+    Ok(rb::bool_value(rb_self.decompressor.is_some()))
 }
 
 fn block_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE> {
     let rb_self = unsafe { block_codec_ref(rb_self)? };
     let mut input = rb::input_bytes(rb_input)?;
-    let release_gvl = should_release_compress_gvl(input.len());
+    let release_gvl = rb_self.should_release_compress_gvl(input.len());
     input.freeze_for_without_gvl(release_gvl)?;
 
     let out = match &rb_self.compressor {
@@ -277,7 +329,14 @@ fn block_codec_compress_impl(rb_self: VALUE, rb_input: VALUE) -> RbResult<VALUE>
             release_gvl,
             "BlockCodec compressor",
             &mut input,
-            |comp, input| Ok(comp.compress(input)),
+            |comp, input| {
+                let out = comp.compress(input);
+                // A ratio compressor makes its larger tables on first use.
+                rb_self
+                    .compressor_heap
+                    .store(comp.heap_size(), Ordering::Relaxed);
+                Ok(out)
+            },
         )?,
     };
 
@@ -324,8 +383,8 @@ fn block_codec_decompress_impl(
     }
 }
 
-unsafe extern "C" fn block_codec_new(class: VALUE, rb_dict: VALUE) -> VALUE {
-    rb::wrap(|| block_codec_new_impl(class, rb_dict))
+unsafe extern "C" fn block_codec_new(class: VALUE, rb_dict: VALUE, rb_ratio: VALUE) -> VALUE {
+    rb::wrap(|| block_codec_new_impl(class, rb_dict, rb_ratio))
 }
 
 unsafe extern "C" fn block_codec_size(rb_self: VALUE) -> VALUE {
@@ -656,7 +715,7 @@ fn init() -> RbResult<()> {
     let codec_class = unsafe { rb::define_class_under(module, c"BlockCodec", rb_sys::rb_cObject)? };
     unsafe {
         rb::undef_alloc_func(codec_class)?;
-        rb::define_singleton_method_1(codec_class, c"_native_new", block_codec_new)?;
+        rb::define_singleton_method_2(codec_class, c"_native_new", block_codec_new)?;
         rb::define_method_0(codec_class, c"size", block_codec_size)?;
         rb::define_method_0(codec_class, c"has_dict?", block_codec_has_dict)?;
         rb::define_method_1(codec_class, c"compress", block_codec_compress)?;

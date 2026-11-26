@@ -8,14 +8,10 @@ module Lz4rip
   # `BlockCodec` keeps mutable native scratch state and is intended to be used
   # per Ractor.
   #
-  # @!method self.new(dict: nil)
-  #   Create a block codec.
-  #   @param dict [Dictionary, String, nil] optional LZ4 dictionary
-  #   @return [BlockCodec]
-  #
-  # @!method self._native_new(dict)
+  # @!method self._native_new(dict, ratio)
   #   Native constructor used by `.new`.
   #   @param dict [String, nil] dictionary bytes
+  #   @param ratio [Boolean] use the ratio profile
   #   @return [BlockCodec]
   #
   # @!method compress(bytes)
@@ -34,10 +30,31 @@ module Lz4rip
   #   @return [Boolean]
   #
   # @!method size
-  #   @return [Integer] internal state size in bytes
+  #   Bytes the codec holds natively: its compressor tables made so far and
+  #   its copies of the dictionary.
+  #   @return [Integer]
   class BlockCodec
-    def self.new(dict: nil)
-      _native_new(Dictionary === dict ? dict.bytes : dict)
+    PROFILES = %i[fast ratio].freeze
+
+
+    # Create a block codec.
+    #
+    # The `:ratio` profile compresses to smaller output, more slowly, and
+    # decodes with any LZ4 decoder. It holds an 8 KB table, plus 64 KB from
+    # its first input above 4 KiB. With a dictionary it hashes the dictionary
+    # once and holds 16 KB of tables while input and dictionary stay within
+    # 4 KiB, 64 KB more for larger inputs.
+    #
+    # @param dict [Dictionary, String, nil] optional LZ4 dictionary
+    # @param profile [Symbol] `:fast` or `:ratio`
+    # @return [BlockCodec]
+    # @raise [ArgumentError] on an unknown profile
+    def self.new(dict: nil, profile: :fast)
+      unless PROFILES.include?(profile)
+        raise ArgumentError, "profile must be :fast or :ratio, got #{profile.inspect}"
+      end
+
+      _native_new(Dictionary === dict ? dict.bytes : dict, profile == :ratio)
     end
 
 
@@ -61,5 +78,6 @@ module Lz4rip
 
       _decompress(bytes, decompressed_size)
     end
+
   end
 end

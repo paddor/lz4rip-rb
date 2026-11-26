@@ -4,10 +4,18 @@
 
 - Update the `lz4rip` crate dependency to 0.12.9, for the ratio profile with
   a dictionary and the compressors' heap sizes.
+- `BlockCodec.new(profile: :ratio)`, with or without `dict:`, compresses to
+  smaller output with lz4rip's ratio profile. Any LZ4 decoder reads it. With
+  a dictionary, it hashes the dictionary once instead of for each message.
+  It releases the GVL from 128 KiB inputs instead of 256 KiB: it compresses
+  1.4-10x slower per byte.
 - `BlockCodec#decompress` raises `DecompressError` for a `decompressed_size:`
   the block cannot decode to (more than 255 times its length) before
   allocating, and takes an optional `max_decompressed_size:`, as
   `FrameCodec#decompress` does.
+- `BlockCodec#size` reports the bytes the codec holds: its compressor
+  tables, including those a ratio codec makes on first use, and its copies
+  of the dictionary. A dictionary codec reported one table and one copy.
 
 ## [0.2.2] - 2026-11-26
 
