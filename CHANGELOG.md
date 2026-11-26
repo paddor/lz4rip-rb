@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Update the `lz4rip` crate dependency to 0.12.9, for the ratio profile with
+  a dictionary and the compressors' heap sizes.
 - `BlockCodec#decompress` raises `DecompressError` for a `decompressed_size:`
   the block cannot decode to (more than 255 times its length) before
   allocating, and takes an optional `max_decompressed_size:`, as
